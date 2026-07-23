@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: live-ai-assistant-api
+    runtime: docker
+    rootDir: backend
+    healthCheckPath: /health
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: APP_API_KEY
+        sync: false
+      - key: CHAT_RATE_LIMIT
+        value: 20/minute
+      - key: REQUEST_TIMEOUT_SECONDS
+        value: "60"

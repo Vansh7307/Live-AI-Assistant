@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+exclude = [".venv", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # line length is enforced by the formatter, not the linter
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+exclude = ["tests/"]
+
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 60

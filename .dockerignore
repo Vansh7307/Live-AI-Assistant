@@ -1,0 +1,17 @@
+.git
+.github
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.env
+*.env
+!*.env.example
+**/memory.sqlite3
+**/*.log
+.pytest_cache
+htmlcov
+coverage.xml
+*.md
+!README.md
+.DS_Store
+node_modules

@@ -1,0 +1,6 @@
+-r requirements.txt
+ruff==0.6.9
+mypy==1.11.2
+bandit==1.7.10
+pip-audit==2.7.3
+coverage==7.6.1

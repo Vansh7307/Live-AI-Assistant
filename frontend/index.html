@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live AI Assistant</title>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --border: #e2e2e5;
+      --accent: #2563eb;
+      --error: #dc2626;
+      --text-muted: #6b7280;
+    }
+    body {
+      font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+      margin: 0;
+      padding: 24px;
+      max-width: 900px;
+      margin-inline: auto;
+      background: var(--bg);
+      color: #111;
+    }
+    h1 { font-size: 22px; }
+    textarea {
+      width: 100%;
+      height: 80px;
+      box-sizing: border-box;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: inherit;
+      resize: vertical;
+    }
+    button {
+      padding: 10px 18px;
+      margin-top: 10px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .msg {
+      margin: 10px 0;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+    }
+    .msg.error { border-color: var(--error); background: #fef2f2; }
+    .role { font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; }
+    .sources { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+    .sources a { display: block; margin: 4px 0; font-size: 13px; color: var(--accent); }
+    .answer { white-space: pre-wrap; margin-top: 4px; }
+    .status { font-size: 13px; color: var(--text-muted); margin-top: 6px; }
+    .composer { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  </style>
+</head>
+<body>
+  <h1>Live AI Assistant</h1>
+
+  <div class="composer">
+    <div class="role">You</div>
+    <textarea id="input" placeholder="Ask something... (e.g., Latest news about X)"></textarea>
+    <br />
+    <button id="send" type="button">Send</button>
+    <span class="status" id="status"></span>
+  </div>
+
+  <div id="chat"></div>
+
+<script src="config.js"></script>
+<script>
+  const chat = document.getElementById('chat');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const statusEl = document.getElementById('status');
+
+  // Resolution order: ?api=/?apiKey= query params (handy for quick testing)
+  // > config.js (the normal deployed setup) > localhost default.
+  const apiBaseUrl = new URLSearchParams(window.location.search).get('api') ||
+    window.__API_BASE_URL__ ||
+    (['localhost', '127.0.0.1'].includes(window.location.hostname) ? 'http://localhost:8000' : window.location.origin);
+
+  const apiKey = new URLSearchParams(window.location.search).get('apiKey') || window.__API_KEY__ || '';
+
+  // Each browser gets its own persistent session id so conversation memory
+  // on the backend is scoped per-user instead of shared globally.
+  const SESSION_STORAGE_KEY = 'live-ai-assistant-session-id';
+  let sessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+  if (!sessionId) {
+    sessionId = crypto.randomUUID();
+    localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  }
+
+  function addMsg(role, content, { isError = false } = {}) {
+    const div = document.createElement('div');
+    div.className = 'msg' + (isError ? ' error' : '');
+    div.innerHTML = `<div class="role"></div><div class="answer"></div>`;
+    div.querySelector('.role').textContent = role;
+    div.querySelector('.answer').textContent = content;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+    window.scrollTo(0, document.body.scrollHeight);
+    return div;
+  }
+
+  function addSources(sources) {
+    const div = document.createElement('div');
+    div.className = 'sources';
+    div.innerHTML = '<b>Sources</b>';
+    for (const s of sources) {
+      const a = document.createElement('a');
+      a.href = s.url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = s.title || s.url;
+      div.appendChild(a);
+    }
+    return div;
+  }
+
+  async function send() {
+    const message = input.value.trim();
+    if (!message) return;
+
+    addMsg('You', message);
+    input.value = '';
+
+    sendBtn.disabled = true;
+    input.disabled = true;
+    statusEl.textContent = 'Thinking…';
+
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (apiKey) headers['X-API-Key'] = apiKey;
+
+      const resp = await fetch(`${apiBaseUrl.replace(/\/$/, '')}/chat`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ message, session_id: sessionId }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `Request failed (${resp.status})`);
+
+      if (data.session_id) {
+        sessionId = data.session_id;
+        localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+      }
+
+      const answerDiv = addMsg('Assistant', data.answer || '');
+      if (data.sources && data.sources.length) {
+        answerDiv.appendChild(addSources(data.sources));
+      }
+    } catch (error) {
+      addMsg('Assistant', `Sorry, ${error.message || 'something went wrong'}.`, { isError: true });
+    } finally {
+      sendBtn.disabled = false;
+      input.disabled = false;
+      statusEl.textContent = '';
+      input.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', send);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+</script>
+</body>
+</html>
