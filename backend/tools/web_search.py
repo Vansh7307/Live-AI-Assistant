@@ -7,6 +7,8 @@ from typing import Any
 
 from tavily import TavilyClient
 
+from observability import CHAT_SEARCH_CALLS, CHAT_SEARCH_FAILURES
+
 logger = logging.getLogger(__name__)
 
 _CLIENT: TavilyClient | None = None
@@ -30,6 +32,7 @@ async def tavily_search(
     answering from the model's own knowledge instead of hard-failing the
     whole request."""
     client = _get_client()
+    CHAT_SEARCH_CALLS.inc()
     try:
         res = await asyncio.wait_for(
             asyncio.to_thread(
@@ -37,10 +40,8 @@ async def tavily_search(
             ),
             timeout=timeout_seconds,
         )
-    except asyncio.TimeoutError:
-        logger.warning("Tavily search timed out for query: %s", query)
-        return []
-    except Exception as exc:  # noqa: BLE001
+    except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001
+        CHAT_SEARCH_FAILURES.inc()
         logger.warning("Tavily search failed for query %r: %s", query, exc)
         return []
 
@@ -54,3 +55,4 @@ async def tavily_search(
             }
         )
     return results
+

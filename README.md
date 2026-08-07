@@ -9,20 +9,39 @@ app_port: 7860
 
 # Live AI Assistant
 
-AI assistant that:
-- Searches the live web for context (Tavily)
-- Answers using that context with inline citations
-- Verifies/corrects the draft answer against the latest sources
-- Remembers each user's own conversation (SQLite, scoped per session)
-- Degrades gracefully: a flaky search or verification call never fails the whole request
+A production-grade, **live** streaming AI assistant.
+
+- **Live web search** for current context (Tavily) with inline citations
+- **Streams answers token-by-token** over Server-Sent Events (SSE) for a real-time chat feel
+- **Verifies/corrects** the draft answer against the latest sources
+- **Multi-provider LLM** with automatic failover (Gemini → OpenAI → Anthropic)
+- **Long-term memory** per session with automatic summarization
+  (SQLite for single-instance, PostgreSQL for multi-instance production)
+- **Observable**: Prometheus `/metrics`, `/health/live`, `/health/ready`, request tracing
+- **Safety layer**: configurable prompt-injection + output-content guardrails
+- **Degrades gracefully**: a flaky search or verification call never fails the whole request
+
+## Features at a glance
+
+| Capability | Details |
+| --- | --- |
+| Streaming | `POST /chat/stream` (SSE) plus classic `POST /chat` |
+| LLM failover | Gemini, OpenAI, Anthropic — tried in `LLM_PROVIDERS` order |
+| Memory | SQLite (default) or PostgreSQL (`DATABASE_URL`), per-session, + summaries |
+| Observability | Prometheus `/metrics`, structured logs, W3C `traceparent` |
+| Safety | Prompt-injection detection + output blocklist |
+| Hardening | API-key auth, per-IP rate limiting, non-root Docker, healthchecks |
+| DevOps | CI (lint/type/sec/deps/tests), secret scanning, k8s manifests |
 
 ## Tech
-- Backend: Python + FastAPI
+- Backend: Python + FastAPI (async)
 - Agent orchestration: LangGraph
-- LLM: Google Gemini
+- LLMs: Google Gemini, OpenAI, Anthropic (provider-agnostic with failover)
 - Web search: Tavily
-- Memory: SQLite via SQLAlchemy (per-session, singleton connection pool)
-- Rate limiting: slowapi
+- Memory: SQLAlchemy (SQLite or PostgreSQL), singleton connection pool
+- Streaming: Server-Sent Events
+- Observability: prometheus_client
+- Rate limiting / auth: slowapi + optional `X-API-Key`
 
 ## ⚠️ Security first
 
@@ -43,9 +62,12 @@ Before deploying publicly:
 - Set `CORS_ORIGINS` to your real frontend origin(s) only.
 
 ## Setup
-1. Create API keys:
+1. Create API keys (you need **at least one** LLM provider + Tavily):
    - `GOOGLE_API_KEY` (Gemini) — https://aistudio.google.com/
    - `TAVILY_API_KEY` — https://tavily.com/
+   - Optional fallback providers for automatic failover:
+     - `OPENAI_API_KEY` — https://platform.openai.com/
+     - `ANTHROPIC_API_KEY` — https://console.anthropic.com/
 
 2. Install dependencies:
    ```bash
@@ -66,6 +88,10 @@ uvicorn main:app --reload --port 8000
 Open `frontend/index.html` in a browser (or serve it with any static file
 server). If your backend requires `APP_API_KEY`, open the page as
 `frontend/index.html?apiKey=YOUR_KEY`.
+
+For a streaming/localhost demo simply open the page; it auto-detects
+`http://localhost:8000` and uses the SSE `/chat/stream` endpoint by default,
+falling back to `POST /chat` if streaming is unavailable.
 
 ## Tests
 ```bash
@@ -100,7 +126,7 @@ your Vercel URL.
 
 ## API
 
-`POST /chat`
+### `POST /chat` (non-streaming)
 ```json
 { "message": "What is ...?", "session_id": "optional-existing-session-id" }
 ```
@@ -117,4 +143,24 @@ Send it back on every subsequent call so conversation memory stays scoped to
 that user. Requires header `X-API-Key: <APP_API_KEY>` if that variable is set
 on the server.
 
-`GET /health` → `{ "status": "ok" }`
+### `POST /chat/stream` (SSE)
+Same request body. Returns a `text/event-stream` with named events:
+
+| event | data |
+| --- | --- |
+| `session` | `{ "session_id": "..." }` — reuse on the next request |
+| `sources` | `{ "sources": [...] }` — search results for citation badges |
+| `token` | `{ "token": "..." }` — one chunk of the answer (streamed live) |
+| `done` | `{}` — stream complete |
+| `error` | `{ "detail": "..." }` — a recoverable error |
+
+### `GET /sessions`
+Returns `{ "sessions": [...] }` — recent sessions + summaries for the
+frontend history sidebar.
+
+### Health & operations
+- `GET /health` → `{ "status": "ok" }`
+- `GET /health/live` → `{ "status": "alive" }` (liveness probe)
+- `GET /health/ready` → `{ "status": "ready" }` or HTTP 503 if no LLM provider
+  is configured (readiness probe)
+- `GET /metrics` → Prometheus metrics (scrape target)

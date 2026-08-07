@@ -16,7 +16,9 @@ class TavilySearchTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch("tools.web_search._get_client", return_value=fake_client):
             results = await web_search.tavily_search("q")
-        self.assertEqual(results, [{"title": "T", "url": "https://x.test", "snippet": "snippet"}])
+        self.assertEqual(
+            results, [{"title": "T", "url": "https://x.test", "snippet": "snippet"}]
+        )
 
     async def test_provider_failure_degrades_to_empty_list(self):
         fake_client = MagicMock()

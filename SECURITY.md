@@ -30,12 +30,26 @@ remote.
 
 ## Known limitations (by design, tracked here rather than hidden)
 
-- `/chat` has no authentication unless `APP_API_KEY` is set. Set it before
-  exposing this service publicly.
-- Memory is a single SQLite file. That's fine for a single-instance
-  deployment; it is **not** safe to run multiple API replicas against the
-  same file without moving to a real database (e.g. Postgres) - concurrent
-  writers to SQLite will contend/lock.
-- Conversation history has no automatic retention/expiry policy. If you
-  operate this for real users, add a data-retention job and document it in
-  a privacy policy before launch.
+- `/chat` and `/chat/stream` have no authentication unless `APP_API_KEY` is
+  set. Set it before exposing this service publicly.
+- Memory defaults to a single SQLite file. That's fine for a single-instance
+  deployment; for multiple replicas, set `DATABASE_URL` to PostgreSQL (the
+  app auto-upgrades `postgres://` to the psycopg driver). Concurrent writers
+  to a single SQLite file will contend/lock, so SQLite is not safe for
+  scaled-out multi-instance production.
+- Conversation history has no automatic retention/expiry policy by default.
+  A `Memory.cleanup_old_sessions(max_age_days=...)` method is provided for a
+  scheduled job; wire it to your own scheduler and document it in a privacy
+  policy before launch.
+- The built-in safety layer is a heuristic, defense-in-depth guardrail
+  (prompt-injection score + optional output blocklist). It is **not** a
+  substitute for a dedicated moderation service at scale. For stricter
+  enforcement, layer in a commercial moderation API and/or the provider's own
+  safety filters.
+- The `/sessions` endpoint (used by the frontend history sidebar) is
+  unauthenticated unless `APP_API_KEY` is set. If you deploy it publicly,
+  set `APP_API_KEY` so the session list is also protected.
+- Secret scanning is wired into CI via gitleaks. For local development we
+  recommend also installing [pre-commit](https://pre-commit.com/) with a
+  gitleaks hook so an accidental key commit is caught before it reaches a
+  remote.

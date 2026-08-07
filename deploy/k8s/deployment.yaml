@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: live-ai-assistant
+  labels:
+    app: live-ai-assistant
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: live-ai-assistant
+  template:
+    metadata:
+      labels:
+        app: live-ai-assistant
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8000"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: live-ai-assistant:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: live-ai-assistant-secrets
+          env:
+            - name: CHAT_RATE_LIMIT
+              value: "20/minute"
+            - name: CORS_ORIGINS
+              value: "https://your-frontend.example.com"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            # Writable mount for the SQLite memory file (the app also
+            # supports Postgres via DATABASE_URL for multi-instance).
+            - name: memory
+              mountPath: /app/backend/memory
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: memory
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: live-ai-assistant
+  labels:
+    app: live-ai-assistant
+spec:
+  selector:
+    app: live-ai-assistant
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: live-ai-assistant
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: your-domain.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: live-ai-assistant
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - your-domain.example.com
+      secretName: live-ai-assistant-tls
