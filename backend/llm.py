@@ -20,11 +20,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
 
 _QUOTA_MARKERS = ("429", "quota", "rate limit", "resource_exhausted", "insufficient_quota")
+_CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "3"))
+_CIRCUIT_RESET_SECONDS = float(os.getenv("LLM_CIRCUIT_RESET_SECONDS", "30"))
+_CIRCUITS: dict[str, dict[str, float]] = {}
 
 
 class LLMError(Exception):
@@ -166,6 +170,33 @@ def _is_quota(exc: Exception) -> bool:
     return any(marker in str(exc).lower() for marker in _QUOTA_MARKERS)
 
 
+def _provider_key(provider: Any) -> str:
+    return provider.__class__.__name__
+
+
+def _circuit_open(provider: Any) -> bool:
+    state = _CIRCUITS.get(_provider_key(provider))
+    if not state:
+        return False
+    if state.get("opened_until", 0) <= time.monotonic():
+        _CIRCUITS.pop(_provider_key(provider), None)
+        return False
+    return True
+
+
+def _record_provider_failure(provider: Any) -> None:
+    key = _provider_key(provider)
+    state = _CIRCUITS.setdefault(key, {"failures": 0, "opened_until": 0})
+    state["failures"] += 1
+    if state["failures"] >= _CIRCUIT_FAILURE_THRESHOLD:
+        state["opened_until"] = time.monotonic() + _CIRCUIT_RESET_SECONDS
+        logger.warning("Circuit opened for provider %s", key)
+
+
+def _record_provider_success(provider: Any) -> None:
+    _CIRCUITS.pop(_provider_key(provider), None)
+
+
 async def _run_with_timeout(
     fn: Callable[[], Awaitable[str]], timeout_seconds: float
 ) -> str:
@@ -193,14 +224,20 @@ async def generate_text(
 
     last_error: Exception | None = None
     for provider in providers:
+        if _circuit_open(provider):
+            logger.warning("Skipping provider %s because its circuit is open", _provider_key(provider))
+            continue
         for attempt in range(retries + 1):
             try:
-                return await _run_with_timeout(
+                result = await _run_with_timeout(
                     lambda p=provider: p.generate(prompt, temperature),
                     timeout_seconds,
                 )
+                _record_provider_success(provider)
+                return result
             except Exception as exc:  # noqa: BLE001 - deliberate retry/failover
                 last_error = exc
+                _record_provider_failure(provider)
                 is_quota = _is_quota(exc)
                 is_last_attempt = attempt == retries
                 logger.warning(
@@ -216,7 +253,8 @@ async def generate_text(
         # Move on to the next provider regardless of why this one failed.
         logger.info("Failing over to next LLM provider after %s", provider.__class__.__name__)
 
-    assert last_error is not None
+    if last_error is None:
+        raise LLMProviderError("All configured AI providers are temporarily unavailable.")
     if _is_quota(last_error):
         raise LLMQuotaError(str(last_error)) from last_error
     raise last_error
@@ -242,6 +280,10 @@ async def stream_text(
 
     last_error: Exception | None = None
     for provider in providers:
+        if _circuit_open(provider):
+            logger.warning("Skipping provider %s because its circuit is open", _provider_key(provider))
+            continue
+        emitted_tokens = False
         try:
             # Run the generator in a thread so blocking provider SDKs don't
             # stall the event loop; pull chunks as they arrive.
@@ -251,12 +293,19 @@ async def stream_text(
             gen = await asyncio.to_thread(_iter)
             while True:
                 chunk = await asyncio.wait_for(asyncio.to_thread(next, gen), timeout=timeout_seconds)
+                emitted_tokens = True
                 yield chunk
             # unreachable
         except StopIteration:
+            _record_provider_success(provider)
             return
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            _record_provider_failure(provider)
+            if emitted_tokens:
+                # Retrying after yielding text would produce a duplicate or
+                # contradictory answer, so the SSE boundary reports failure.
+                raise
             logger.warning(
                 "LLM provider %s stream failed, trying next: %s",
                 provider.__class__.__name__,
@@ -264,7 +313,8 @@ async def stream_text(
             )
             continue
 
-    if last_error is not None:
-        if _is_quota(last_error):
-            raise LLMQuotaError(str(last_error)) from last_error
-        raise last_error
+    if last_error is None:
+        raise LLMProviderError("All configured AI providers are temporarily unavailable.")
+    if _is_quota(last_error):
+        raise LLMQuotaError(str(last_error)) from last_error
+    raise last_error

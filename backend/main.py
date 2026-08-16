@@ -18,6 +18,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.responses import JSONResponse
+import psutil
 
 from agent_graph import build_and_run, stream_answer
 from llm import LLMQuotaError
@@ -34,10 +35,31 @@ load_dotenv()
 # other - llm.py, tools.*, agent_graph.py, even third-party loggers like
 # uvicorn/httpx) without needing to pass `extra=` at every call site.
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+_endpoint_var: contextvars.ContextVar[str] = contextvars.ContextVar("endpoint", default="-")
+_client_ip_var: contextvars.ContextVar[str] = contextvars.ContextVar("client_ip", default="-")
+_latency_var: contextvars.ContextVar[float | None] = contextvars.ContextVar("latency_ms", default=None)
+
+
+class JsonFormatter(logging.Formatter):
+    """Emit machine-readable logs suitable for Render and log aggregation."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": getattr(record, "request_id", "-"),
+            "endpoint": getattr(record, "endpoint", "-"),
+            "client_ip": getattr(record, "client_ip", "-"),
+            "latency_ms": getattr(record, "latency_ms", None),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s",
 )
 
 _base_record_factory = logging.getLogRecordFactory()
@@ -46,10 +68,15 @@ _base_record_factory = logging.getLogRecordFactory()
 def _record_factory(*args, **kwargs):
     record = _base_record_factory(*args, **kwargs)
     record.request_id = _request_id_var.get()
+    record.endpoint = _endpoint_var.get()
+    record.client_ip = _client_ip_var.get()
+    record.latency_ms = _latency_var.get()
     return record
 
 
 logging.setLogRecordFactory(_record_factory)
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(JsonFormatter())
 logger = logging.getLogger(__name__)
 
 RATE_LIMIT = os.getenv("CHAT_RATE_LIMIT", "20/minute")
@@ -107,7 +134,9 @@ async def request_context_middleware(request: Request, call_next):
     stuck upstream call can't hold a rate-limit slot / connection forever."""
     request_id = request.headers.get("X-Request-Id", str(uuid.uuid4()))
     request.state.request_id = request_id
-    token = _request_id_var.set(request_id)
+    request_id_token = _request_id_var.set(request_id)
+    endpoint_token = _endpoint_var.set(request.url.path)
+    client_ip_token = _client_ip_var.set(request.client.host if request.client else "-")
     start = time.monotonic()
 
     try:
@@ -120,9 +149,10 @@ async def request_context_middleware(request: Request, call_next):
                 request.method,
                 request.url.path,
             )
-            return JSONResponse(status_code=504, content={"detail": "The request took too long to complete."})
+            response = JSONResponse(status_code=504, content={"detail": "The request took too long to complete."})
 
         duration_ms = (time.monotonic() - start) * 1000
+        latency_token = _latency_var.set(round(duration_ms, 3))
         response.headers["X-Request-Id"] = request_id
         logger.info(
             "%s %s -> %s (%.1fms)",
@@ -131,9 +161,12 @@ async def request_context_middleware(request: Request, call_next):
             response.status_code,
             duration_ms,
         )
+        _latency_var.reset(latency_token)
         return response
     finally:
-        _request_id_var.reset(token)
+        _request_id_var.reset(request_id_token)
+        _endpoint_var.reset(endpoint_token)
+        _client_ip_var.reset(client_ip_token)
 
 
 class ChatRequest(BaseModel):
@@ -241,8 +274,16 @@ async def chat_stream(
         raise HTTPException(status_code=422, detail=exc.detail) from exc
 
     session_id = req.session_id or str(uuid.uuid4())
+    request_id = request.state.request_id
+    client_ip = request.client.host if request.client else "-"
 
     async def event_gen():
+        # Streaming happens after HTTP middleware returns the response object,
+        # so restore request context explicitly for all stream-time logs.
+        request_id_token = _request_id_var.set(request_id)
+        endpoint_token = _endpoint_var.set(request.url.path)
+        client_ip_token = _client_ip_var.set(client_ip)
+        started = time.monotonic()
         ACTIVE_CHATS.inc()
         try:
             try:
@@ -266,6 +307,12 @@ async def chat_stream(
                 yield _sse("error", {"detail": "The assistant could not complete this request."})
         finally:
             ACTIVE_CHATS.dec()
+            latency_token = _latency_var.set(round((time.monotonic() - started) * 1000, 3))
+            logger.info("SSE stream completed")
+            _latency_var.reset(latency_token)
+            _request_id_var.reset(request_id_token)
+            _endpoint_var.reset(endpoint_token)
+            _client_ip_var.reset(client_ip_token)
 
     return StreamingResponse(
         event_gen(),
@@ -305,11 +352,22 @@ async def session_history(
 async def health():
     # Keep this dependency-free so orchestrators can use it during startup.
     started = time.monotonic()
+    from tools.web_search import cache_stats
+
+    providers = {
+        "gemini": bool(os.getenv("GOOGLE_API_KEY")),
+        "openai": bool(os.getenv("OPENAI_API_KEY")),
+        "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "web_search": bool(os.getenv("TAVILY_API_KEY")),
+    }
     return {
         "status": "ok",
         "uptime_seconds": round(started - _STARTED_AT, 3),
         "latency_ms": round((time.monotonic() - started) * 1000, 3),
         "version": app.version,
+        "memory": {"rss_bytes": psutil.Process().memory_info().rss},
+        "providers": providers,
+        "cache": cache_stats(),
     }
 
 

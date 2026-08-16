@@ -17,6 +17,15 @@ _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _CACHE_TTL_SECONDS = max(0, int(os.getenv("SEARCH_CACHE_TTL_SECONDS", "60")))
 
 
+def cache_stats() -> dict[str, int]:
+    """Return cache metadata only; cached search content is never exposed."""
+    now = time.monotonic()
+    expired = [query for query, (expires_at, _) in _CACHE.items() if expires_at <= now]
+    for query in expired:
+        _CACHE.pop(query, None)
+    return {"entries": len(_CACHE), "ttl_seconds": _CACHE_TTL_SECONDS}
+
+
 def _get_client() -> TavilyClient:
     global _CLIENT
     if _CLIENT is None:

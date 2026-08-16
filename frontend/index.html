@@ -195,6 +195,17 @@
       color: var(--text);
     }
     .sidebar-toggle { display: none; }
+    .connection-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--bg);
+      font-size: 12px;
+      white-space: nowrap;
+    }
 
     /* â”€â”€ Chat messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
     .chat-area {
@@ -499,9 +510,9 @@
         <button class="sidebar-toggle" id="sidebarToggle" title="Open sidebar">â˜°</button>
         <h1>ðŸ¤– Live AI Assistant</h1>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);">
+      <div class="connection-pill" aria-live="polite" title="Backend connection status">
         <span id="statusBadge" style="width:8px;height:8px;border-radius:50%;background:var(--success);display:inline-block;"></span>
-        <span id="statusText">Ready</span>
+        <span id="statusText">Checking backend…</span>
       </div>
     </header>
 
@@ -561,6 +572,10 @@
     let isStreaming = false;
     let abortController = null;
     let streamSources = []; // sources for the current streaming message
+    let healthRetryAttempt = 0;
+    let healthRetryTimer = null;
+    let pendingStreamToken = '';
+    let streamRenderFrame = null;
 
     // â”€â”€ Theme â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     function getTheme() { return localStorage.getItem('theme') || 'light'; }
@@ -720,6 +735,21 @@
       scrollToBottom();
     }
 
+    function flushStreamTokens() {
+      streamRenderFrame = null;
+      const lastMsg = document.querySelector('.message.assistant[data-streaming]');
+      if (!lastMsg || !pendingStreamToken) return;
+      const contentDiv = lastMsg.querySelector('.bubble > div:first-child');
+      const currentText = lastMsg.dataset.fullText || '';
+      lastMsg.dataset.fullText = currentText + pendingStreamToken;
+      pendingStreamToken = '';
+      if (contentDiv) {
+        contentDiv.innerHTML = renderMarkdown(lastMsg.dataset.fullText);
+        highlightCode(contentDiv);
+        scrollToBottom();
+      }
+    }
+
     function scrollToBottom() {
       chatArea.scrollTop = chatArea.scrollHeight;
     }
@@ -814,7 +844,7 @@
 
       sendBtn.disabled = true;
       isStreaming = true;
-      setStatus('thinking', 'Thinkingâ€¦');
+      setStatus('thinking', 'Generating…');
 
       const headers = { 'Content-Type': 'application/json' };
 
@@ -868,7 +898,7 @@
           }
         }
 
-        setStatus('ready', 'Ready');
+        checkHealth();
       } catch (e) {
         if (!streamUsed) {
           // Non-streaming fallback
@@ -891,11 +921,12 @@
         } else {
           removeTyping();
           addMessage('assistant', `Sorry, the stream ended unexpectedly. Please try again.`, { isError: true });
+          scheduleHealthRetry();
         }
       } finally {
         isStreaming = false;
         sendBtn.disabled = false;
-        setStatus('ready', 'Ready');
+        checkHealth();
         loadSessions();
         input.focus();
       }
@@ -926,18 +957,15 @@
           }
           const lastMsg = document.querySelector('.message.assistant[data-streaming]');
           if (lastMsg) {
-            const contentDiv = lastMsg.querySelector('.bubble > div:first-child');
-            if (contentDiv) {
-              // Accumulate
-              const currentText = lastMsg.dataset.fullText || '';
-              lastMsg.dataset.fullText = currentText + data.token;
-              contentDiv.innerHTML = renderMarkdown(lastMsg.dataset.fullText);
-              highlightCode(contentDiv);
-              scrollToBottom();
-            }
+            // Batch token rendering to one update per animation frame. This
+            // keeps Markdown sanitization smooth even on high-frequency SSE.
+            pendingStreamToken += data.token;
+            if (!streamRenderFrame) streamRenderFrame = requestAnimationFrame(flushStreamTokens);
           }
           break;
         case 'done':
+          if (streamRenderFrame) cancelAnimationFrame(streamRenderFrame);
+          flushStreamTokens();
           const streamingMsg = document.querySelector('.message.assistant:last-child[data-streaming]');
           if (streamingMsg) {
             delete streamingMsg.dataset.streaming;
@@ -949,8 +977,12 @@
           }
           break;
         case 'error':
+          if (streamRenderFrame) cancelAnimationFrame(streamRenderFrame);
+          flushStreamTokens();
+          document.querySelector('.message.assistant[data-streaming]')?.removeAttribute('data-streaming');
           removeTyping();
           addMessage('assistant', data.detail || 'An error occurred.', { isError: true });
+          scheduleHealthRetry();
           break;
       }
     }
@@ -959,8 +991,44 @@
     function setStatus(state, text) {
       statusText.textContent = text;
       statusBadge.style.background = state === 'ready' ? 'var(--success)' :
-        state === 'thinking' ? 'var(--accent)' : 'var(--error)';
+        state === 'thinking' ? 'var(--accent)' : state === 'offline' ? 'var(--error)' : 'var(--text-muted)';
     }
+
+    async function checkHealth() {
+      if (!navigator.onLine) {
+        setStatus('offline', 'Offline — reconnecting…');
+        scheduleHealthRetry();
+        return;
+      }
+      const started = performance.now();
+      try {
+        const response = await fetch(`${API_BASE.replace(/\/$/, '')}/health`, {
+          signal: AbortSignal.timeout(8000),
+          cache: 'no-store',
+        });
+        if (!response.ok) throw new Error(`Health check failed (${response.status})`);
+        await response.json();
+        healthRetryAttempt = 0;
+        clearTimeout(healthRetryTimer);
+        setStatus('ready', `Render connected (${Math.round(performance.now() - started)}ms)`);
+      } catch (_) {
+        setStatus('offline', 'Reconnecting…');
+        scheduleHealthRetry();
+      }
+    }
+
+    function scheduleHealthRetry() {
+      clearTimeout(healthRetryTimer);
+      const delay = Math.min(30000, 1000 * (2 ** healthRetryAttempt++));
+      showToast(`Connection interrupted. Retrying in ${Math.ceil(delay / 1000)}s…`, 'error');
+      healthRetryTimer = setTimeout(checkHealth, delay);
+    }
+
+    window.addEventListener('offline', () => {
+      setStatus('offline', 'Offline — reconnecting…');
+      if (isStreaming) showToast('Network lost. The response may be incomplete.', 'error');
+    });
+    window.addEventListener('online', () => checkHealth());
 
     // â”€â”€ Auto-resize textarea â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     input.addEventListener('input', () => {
@@ -984,6 +1052,8 @@
     saveSessionId(currentSessionId);
     loadSessions();
     loadSessionMessages();
+    checkHealth();
+    setInterval(checkHealth, 30000);
 
     // Show welcome message for returning session
     console.log('ðŸ¤– Live AI Assistant loaded. Session:', currentSessionId);
