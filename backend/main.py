@@ -238,15 +238,10 @@ async def chat(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LLMQuotaError as exc:
         logger.warning("LLM quota/rate limit reached: %s", exc)
-        raise HTTPException(
-            status_code=503, detail="The AI service is temporarily unavailable. Please try again later."
-        ) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LLMProviderError as exc:
         logger.warning("LLM provider is unavailable: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail="No AI provider is available. Check the configured provider API key and try again.",
-        ) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - deliberate catch-all boundary
         logger.exception("Chat request failed (session_id=%s)", session_id)
         raise HTTPException(
@@ -304,16 +299,10 @@ async def chat_stream(
                         yield _sse("done", {})
             except LLMQuotaError as exc:
                 logger.warning("LLM quota during streaming: %s", exc)
-                yield _sse(
-                    "error",
-                    {"detail": "The AI service is temporarily unavailable. Please try again later."},
-                )
+                yield _sse("error", {"detail": str(exc)})
             except LLMProviderError as exc:
                 logger.warning("LLM provider unavailable during streaming: %s", exc)
-                yield _sse(
-                    "error",
-                    {"detail": "No AI provider is available. Check the configured provider API key and try again."},
-                )
+                yield _sse("error", {"detail": str(exc)})
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Streaming chat failed")
                 yield _sse("error", {"detail": "The assistant could not complete this request."})

@@ -43,6 +43,13 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
                 result = await llm.generate_text("hi", temperature=0.2)
         self.assertEqual(result, "ok")
 
+    def test_gemini_uses_supported_default_model(self):
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}, clear=True), patch(
+            "llm._GeminiProvider"
+        ) as mock_provider:
+            llm._provider_from_env()
+        mock_provider.assert_called_once_with("test-key", "gemini-2.0-flash")
+
     async def test_transient_failure_then_success_recovers(self):
         provider = MagicMock()
         provider.generate.side_effect = [RuntimeError("temporary network blip"), "ok after retry"]
@@ -59,7 +66,7 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
         with patch("llm._provider_from_env", return_value=[provider]), patch(
             "asyncio.sleep", new=AsyncMock()
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaisesRegex(llm.LLMProviderError, "Upstream diagnostic: boom"):
                 await llm.generate_text("hi", temperature=0.2, retries=1)
         self.assertEqual(provider.generate.call_count, 2)
 
@@ -92,10 +99,9 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
         with patch("llm._provider_from_env", return_value=[provider]), patch(
             "asyncio.sleep", new=AsyncMock()
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(llm.LLMProviderError):
                 await llm.generate_text("hi", temperature=0.2, retries=0)
 
 
 if __name__ == "__main__":
     unittest.main()
-

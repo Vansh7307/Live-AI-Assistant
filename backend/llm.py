@@ -151,7 +151,7 @@ def _provider_from_env() -> list[Any]:
         if name == "gemini":
             key = os.getenv("GOOGLE_API_KEY")
             if key:
-                providers.append(_GeminiProvider(key, os.getenv("GEMINI_MODEL", "gemini-flash-latest")))
+                providers.append(_GeminiProvider(key, os.getenv("GEMINI_MODEL", "gemini-2.0-flash")))
         elif name == "openai":
             key = os.getenv("OPENAI_API_KEY")
             if key:
@@ -240,13 +240,7 @@ async def generate_text(
                 _record_provider_failure(provider)
                 is_quota = _is_quota(exc)
                 is_last_attempt = attempt == retries
-                logger.warning(
-                    "LLM provider %s failed (attempt %s/%s): %s",
-                    provider.__class__.__name__,
-                    attempt + 1,
-                    retries + 1,
-                    exc,
-                )
+                logger.error(f"LLM Provider execution error: {str(exc)}")
                 if is_quota or is_last_attempt:
                     break
                 await asyncio.sleep(0.5 * (2**attempt))
@@ -256,8 +250,10 @@ async def generate_text(
     if last_error is None:
         raise LLMProviderError("All configured AI providers are temporarily unavailable.")
     if _is_quota(last_error):
-        raise LLMQuotaError(str(last_error)) from last_error
-    raise last_error
+        raise LLMQuotaError(f"Provider quota or rate limit error: {last_error}") from last_error
+    raise LLMProviderError(
+        f"All configured LLM providers failed. Upstream diagnostic: {last_error}"
+    ) from last_error
 
 
 async def stream_text(
@@ -306,15 +302,13 @@ async def stream_text(
                 # Retrying after yielding text would produce a duplicate or
                 # contradictory answer, so the SSE boundary reports failure.
                 raise
-            logger.warning(
-                "LLM provider %s stream failed, trying next: %s",
-                provider.__class__.__name__,
-                exc,
-            )
+            logger.error(f"LLM Provider execution error: {str(exc)}")
             continue
 
     if last_error is None:
         raise LLMProviderError("All configured AI providers are temporarily unavailable.")
     if _is_quota(last_error):
-        raise LLMQuotaError(str(last_error)) from last_error
-    raise last_error
+        raise LLMQuotaError(f"Provider quota or rate limit error: {last_error}") from last_error
+    raise LLMProviderError(
+        f"All configured LLM providers failed. Upstream diagnostic: {last_error}"
+    ) from last_error
