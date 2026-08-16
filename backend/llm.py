@@ -54,25 +54,30 @@ class _GeminiProvider:
         self._model = model
 
     def generate(self, prompt: str, temperature: float) -> str:
-        response = self._client.models.generate_content(
+        interaction = self._client.interactions.create(
             model=self._model,
-            contents=prompt,
-            config={"temperature": temperature},
+            input=prompt,
+            generation_config={"temperature": temperature},
         )
-        if not response.text:
+        if not interaction.output_text:
             raise RuntimeError("Gemini returned an empty response")
-        return response.text
+        return interaction.output_text
 
     def stream(self, prompt: str, temperature: float):
-        from google import genai
-
-        for chunk in self._client.models.generate_content_stream(
+        stream = self._client.interactions.create(
             model=self._model,
-            contents=prompt,
-            config={"temperature": temperature},
-        ):
-            if chunk.text:
-                yield chunk.text
+            input=prompt,
+            generation_config={"temperature": temperature},
+            stream=True,
+        )
+        for event in stream:
+            if (
+                getattr(event, "event_type", None) == "step.delta"
+                and getattr(event, "delta", None)
+                and getattr(event.delta, "type", None) == "text"
+                and getattr(event.delta, "text", None)
+            ):
+                yield event.delta.text
 
 
 class _OpenAIProvider:
@@ -151,7 +156,7 @@ def _provider_from_env() -> list[Any]:
         if name == "gemini":
             key = os.getenv("GOOGLE_API_KEY")
             if key:
-                providers.append(_GeminiProvider(key, os.getenv("GEMINI_MODEL", "gemini-2.0-flash")))
+                providers.append(_GeminiProvider(key, os.getenv("GEMINI_MODEL", "gemini-3.6-flash")))
         elif name == "openai":
             key = os.getenv("OPENAI_API_KEY")
             if key:
