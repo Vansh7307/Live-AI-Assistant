@@ -9,6 +9,12 @@ class FakeGeminiResponse:
         self.text = text
 
 
+class FakeGeminiModel:
+    def __init__(self, name, methods):
+        self.name = name
+        self.supported_generation_methods = methods
+
+
 class FakeOpenAIResponse:
     def __init__(self, text):
         self.message = type("Msg", (), {"content": text})()
@@ -49,6 +55,26 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
         ) as mock_provider:
             llm._provider_from_env()
         mock_provider.assert_called_once_with("test-key", "gemini-2.5-flash")
+
+    def test_gemini_discovers_generate_content_models_after_primary_models(self):
+        client = MagicMock()
+        client.models.list.return_value = [
+            FakeGeminiModel("models/gemini-2.5-flash", ["generateContent"]),
+            FakeGeminiModel("models/key-enabled-model", ["generateContent"]),
+            FakeGeminiModel("models/embedding-only", ["embedContent"]),
+        ]
+
+        models = llm.get_working_models(client)
+
+        self.assertEqual(models[: len(llm.PRIMARY_MODELS)], llm.PRIMARY_MODELS)
+        self.assertEqual(models[-1], "key-enabled-model")
+        self.assertNotIn("embedding-only", models)
+
+    def test_gemini_model_discovery_failure_keeps_primary_models(self):
+        client = MagicMock()
+        client.models.list.side_effect = RuntimeError("listing unavailable")
+
+        self.assertEqual(llm.get_working_models(client), llm.PRIMARY_MODELS)
 
     def test_gemini_generate_uses_generate_content_api(self):
         provider = object.__new__(llm._GeminiProvider)

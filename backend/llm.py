@@ -28,22 +28,15 @@ from google import genai
 logger = logging.getLogger(__name__)
 
 _QUOTA_MARKERS = ("429", "quota", "rate limit", "resource_exhausted", "insufficient_quota")
-GEMINI_MODELS = (
+# Keep only documented current production aliases here. The API discovery below
+# appends models actually enabled for the deployed API key and region.
+PRIMARY_MODELS = (
     "gemini-2.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-pro",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-pro",
 )
-_GEMINI_DEFAULT_MODEL = GEMINI_MODELS[0]
-_GEMINI_MODEL_ERROR_MARKERS = (
-    "404",
-    "not_found",
-    "not found",
-    "model not found",
-    "invalid model",
-    "deprecated",
-)
+_GEMINI_DEFAULT_MODEL = PRIMARY_MODELS[0]
 _CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "3"))
 _CIRCUIT_RESET_SECONDS = float(os.getenv("LLM_CIRCUIT_RESET_SECONDS", "30"))
 _CIRCUITS: dict[str, dict[str, float]] = {}
@@ -64,18 +57,47 @@ class LLMProviderError(LLMError):
     DNS failure, network error)."""
 
 
+def get_working_models(client: Any | None) -> tuple[str, ...]:
+    """Return primary models followed by generateContent-capable API models.
+
+    Discovery is deliberately best-effort: listing failures never prevent the
+    known production models from being used. The Gemini SDK and older API
+    representations use different capability field names, so both are
+    accepted while retaining the same generateContent filter.
+    """
+    models_to_try = list(PRIMARY_MODELS)
+    if client is None:
+        return tuple(models_to_try)
+
+    try:
+        for available_model in client.models.list():
+            methods = (
+                getattr(available_model, "supported_generation_methods", None)
+                or getattr(available_model, "supported_actions", None)
+                or ()
+            )
+            normalized_methods = {str(method).replace("_", "").lower() for method in methods}
+            if "generatecontent" not in normalized_methods:
+                continue
+
+            name = getattr(available_model, "name", "")
+            model_name = name.removeprefix("models/") if name else ""
+            if model_name and model_name not in models_to_try:
+                models_to_try.append(model_name)
+    except Exception as exc:  # noqa: BLE001 - discovery is an optional enhancement
+        logger.warning("[Gemini] Dynamic model listing skipped: %s", exc)
+
+    return tuple(models_to_try)
+
+
 class _GeminiProvider:
     def __init__(self, api_key: str, model: str):
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
     def _candidate_models(self) -> tuple[str, ...]:
-        """Try an explicitly configured model first, then known production aliases."""
-        return tuple(dict.fromkeys((self._model, *GEMINI_MODELS)))
-
-    @staticmethod
-    def _is_model_error(exc: Exception) -> bool:
-        return any(marker in str(exc).lower() for marker in _GEMINI_MODEL_ERROR_MARKERS)
+        """Try an explicit deployment override, then API-resolved candidates."""
+        return tuple(dict.fromkeys((self._model, *get_working_models(self._client))))
 
     @staticmethod
     def _log_model_failure(model: str, exc: Exception) -> None:
@@ -94,8 +116,6 @@ class _GeminiProvider:
                     return response.text
                 raise RuntimeError("Gemini returned an empty response")
             except Exception as exc:
-                if not self._is_model_error(exc):
-                    raise
                 last_error = exc
                 self._log_model_failure(model, exc)
 
@@ -122,7 +142,7 @@ class _GeminiProvider:
                 logger.warning("[Gemini] Model '%s' returned an empty stream. Trying next fallback...", model)
             except Exception as exc:
                 # Once text has been sent, a fallback would duplicate the answer.
-                if emitted_text or not self._is_model_error(exc):
+                if emitted_text:
                     raise
                 last_error = exc
                 self._log_model_failure(model, exc)
