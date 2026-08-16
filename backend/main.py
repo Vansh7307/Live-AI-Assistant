@@ -290,7 +290,11 @@ async def chat_stream(
             try:
                 async for event in stream_answer(req.message, session_id):
                     if event["type"] == "token":
-                        yield _sse("token", {"token": event["token"]})
+                        token = event.get("token")
+                        # Ignore keep-alive/empty provider events so the UI
+                        # never creates an empty assistant message bubble.
+                        if isinstance(token, str) and token.strip():
+                            yield _sse("token", {"token": token})
                     elif event["type"] == "sources":
                         yield _sse("sources", {"sources": event["sources"]})
                     elif event["type"] == "metadata":
@@ -299,10 +303,10 @@ async def chat_stream(
                         yield _sse("done", {})
             except LLMQuotaError as exc:
                 logger.warning("LLM quota during streaming: %s", exc)
-                yield _sse("error", {"detail": str(exc)})
+                yield _sse("error", {"detail": str(exc).replace("\n", " ")})
             except LLMProviderError as exc:
                 logger.warning("LLM provider unavailable during streaming: %s", exc)
-                yield _sse("error", {"detail": str(exc)})
+                yield _sse("error", {"detail": str(exc).replace("\n", " ")})
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Streaming chat failed")
                 yield _sse("error", {"detail": "The assistant could not complete this request."})

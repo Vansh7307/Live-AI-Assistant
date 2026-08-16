@@ -149,6 +149,18 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_gemini_stream_ignores_whitespace_and_uses_next_model(self):
+        provider = object.__new__(llm._GeminiProvider)
+        provider._client = MagicMock()
+        provider._model = "invalid-model"
+        provider._client.models.generate_content_stream.side_effect = [
+            [FakeGeminiResponse("   ")],
+            [FakeGeminiResponse("fallback stream")],
+        ]
+
+        self.assertEqual(list(provider.stream("hi", 0.2)), ["fallback stream"])
+        self.assertEqual(provider._client.models.generate_content_stream.call_count, 2)
+
     async def test_transient_failure_then_success_recovers(self):
         provider = MagicMock()
         provider.generate.side_effect = [RuntimeError("temporary network blip"), "ok after retry"]

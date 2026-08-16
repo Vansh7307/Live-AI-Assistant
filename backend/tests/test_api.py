@@ -91,6 +91,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "text/event-stream; charset=utf-8")
 
+    def test_stream_endpoint_ignores_whitespace_only_tokens(self):
+        async def whitespace_stream(*_args):
+            yield {"type": "token", "token": "   "}
+            yield {"type": "token", "token": "actual content"}
+            yield {"type": "done"}
+
+        with patch.object(main, "stream_answer", new=whitespace_stream):
+            response = self.client.post("/chat/stream", json={"message": "Hello"})
+
+        self.assertNotIn('"token": "   "', response.text)
+        self.assertIn('"token": "actual content"', response.text)
+
     def test_provider_error_has_a_safe_json_response(self):
         with patch.object(main, "build_and_run", new=AsyncMock(side_effect=LLMProviderError("bad key"))):
             response = self.client.post("/chat", json={"message": "Hello"})

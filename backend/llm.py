@@ -133,7 +133,10 @@ class _GeminiProvider:
                 )
                 for chunk in response_stream:
                     text = getattr(chunk, "text", None)
-                    if text:
+                    # Whitespace-only SDK events are not user-visible output.
+                    # Do not mark this model successful until real content has
+                    # crossed the streaming boundary.
+                    if isinstance(text, str) and text.strip():
                         emitted_text = True
                         yield text
                 if emitted_text:
