@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import main
 from main import app
+from llm import LLMProviderError
 
 
 class ApiTests(unittest.TestCase):
@@ -89,6 +90,24 @@ class ApiTests(unittest.TestCase):
         response = self.client.post("/chat/stream", json={"message": "Hello"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "text/event-stream; charset=utf-8")
+
+    def test_provider_error_has_a_safe_json_response(self):
+        with patch.object(main, "build_and_run", new=AsyncMock(side_effect=LLMProviderError("bad key"))):
+            response = self.client.post("/chat", json={"message": "Hello"})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("No AI provider is available", response.json()["detail"])
+
+    def test_provider_error_is_emitted_as_an_sse_event(self):
+        async def failing_stream(*_args):
+            if False:
+                yield {}
+            raise LLMProviderError("bad key")
+
+        with patch.object(main, "stream_answer", new=failing_stream):
+            response = self.client.post("/chat/stream", json={"message": "Hello"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: error", response.text)
+        self.assertIn("No AI provider is available", response.text)
 
     def test_invalid_api_key_is_rejected_when_configured(self):
         original = main.APP_API_KEY

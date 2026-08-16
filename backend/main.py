@@ -21,7 +21,7 @@ from starlette.responses import JSONResponse
 import psutil
 
 from agent_graph import build_and_run, stream_answer
-from llm import LLMQuotaError
+from llm import LLMProviderError, LLMQuotaError
 from safety import SafetyError, check_input, check_output
 from observability import (
     metrics_endpoint,
@@ -241,6 +241,12 @@ async def chat(
         raise HTTPException(
             status_code=503, detail="The AI service is temporarily unavailable. Please try again later."
         ) from exc
+    except LLMProviderError as exc:
+        logger.warning("LLM provider is unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="No AI provider is available. Check the configured provider API key and try again.",
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - deliberate catch-all boundary
         logger.exception("Chat request failed (session_id=%s)", session_id)
         raise HTTPException(
@@ -301,6 +307,12 @@ async def chat_stream(
                 yield _sse(
                     "error",
                     {"detail": "The AI service is temporarily unavailable. Please try again later."},
+                )
+            except LLMProviderError as exc:
+                logger.warning("LLM provider unavailable during streaming: %s", exc)
+                yield _sse(
+                    "error",
+                    {"detail": "No AI provider is available. Check the configured provider API key and try again."},
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Streaming chat failed")

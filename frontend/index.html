@@ -1,8 +1,8 @@
 ﻿<!doctype html>
 <html lang="en" data-theme="light">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Live AI Assistant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -577,7 +577,7 @@
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
-      <h2>ðŸ’¬ Chats</h2>
+      <h2>&#128172; Chats</h2>
       <button class="theme-toggle" id="newChatBtn" title="New chat" style="border:none;background:var(--accent);color:#fff;border-radius:var(--radius-sm);padding:6px 12px;font-size:13px;font-weight:600;">+ New</button>
     </div>
     <div class="sidebar-list" id="sessionList">
@@ -586,7 +586,7 @@
       </div>
     </div>
     <div style="padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px;">
-      <button class="theme-toggle" id="themeToggle" title="Toggle theme" style="flex:1;">ðŸŒ™ Dark</button>
+      <button class="theme-toggle" id="themeToggle" title="Toggle theme" style="flex:1;">&#127769; Dark</button>
     </div>
   </aside>
 
@@ -594,7 +594,7 @@
   <div class="main">
     <header class="main-header">
       <div class="header-actions">
-        <button class="sidebar-toggle" id="sidebarToggle" title="Open sidebar">â˜°</button>
+        <button class="sidebar-toggle" id="sidebarToggle" title="Open sidebar">&#9776;</button>
         <div aria-label="Vansh Live AI Assistant">
           <div class="brand-logo">VANSH</div>
           <div class="brand-subtitle">LIVE AI ASSISTANT</div>
@@ -609,7 +609,7 @@
     <!-- Chat area -->
     <div class="chat-area empty" id="chatArea">
       <div class="empty-state">
-        <div class="icon">ðŸ¤–</div>
+        <div class="icon">&#129302;</div>
         <h2>How can I help you today?</h2>
         <p>I search the web, cite sources, and remember our conversation. Ask me anything!</p>
       </div>
@@ -621,7 +621,7 @@
         <textarea id="input" rows="1" placeholder="Ask anything... (e.g., 'Latest news about AI')" autofocus></textarea>
         <div class="composer-actions">
           <button class="send-btn" id="sendBtn">
-            Send <span style="font-size:16px;">â†’</span>
+            Send <span style="font-size:16px;">&#10132;</span>
           </button>
         </div>
       </div>
@@ -673,7 +673,7 @@
     function setTheme(t) {
       document.documentElement.setAttribute('data-theme', t);
       localStorage.setItem('theme', t);
-      themeToggle.textContent = t === 'dark' ? 'â˜€ï¸ Light' : 'ðŸŒ™ Dark';
+      themeToggle.innerHTML = t === 'dark' ? '&#9728;&#65039; Light' : '&#127769; Dark';
       // Switch highlight theme
       const link = document.getElementById('highlight-theme');
       link.href = t === 'dark'
@@ -732,6 +732,18 @@
       });
     }
 
+    async function getResponseError(response) {
+      const rawBody = await response.text().catch(() => '');
+      let detail = rawBody;
+      try {
+        const body = JSON.parse(rawBody);
+        detail = body.detail || body.message || rawBody;
+      } catch (_) {
+        // A non-JSON proxy or upstream error is still useful for diagnostics.
+      }
+      return detail || response.statusText || 'No error details returned.';
+    }
+
     // â”€â”€ Chat messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     function addMessage(role, content, { isError = false, sources = [] } = {}) {
       // Remove empty state
@@ -743,7 +755,7 @@
 
       const avatar = document.createElement('div');
       avatar.className = 'avatar';
-      avatar.textContent = role === 'user' ? 'ðŸ‘¤' : 'ðŸ¤–';
+      avatar.innerHTML = role === 'user' ? '&#128100;' : '&#129302;';
 
       const bubble = document.createElement('div');
       bubble.className = 'bubble' + (isError ? ' error-msg' : '');
@@ -802,7 +814,7 @@
       msgDiv.id = 'typingIndicator';
       const avatar = document.createElement('div');
       avatar.className = 'avatar';
-      avatar.textContent = 'ðŸ¤–';
+      avatar.innerHTML = '&#129302;';
       const bubble = document.createElement('div');
       bubble.className = 'bubble';
       bubble.innerHTML = '<div class="typing-indicator" role="status" aria-label="Assistant is thinking"><span class="typing-label">Thinking</span><span></span><span></span><span></span></div>';
@@ -848,7 +860,7 @@
     function clearChat() {
       chatArea.innerHTML = `
         <div class="empty-state">
-          <div class="icon">ðŸ¤–</div>
+          <div class="icon">&#129302;</div>
           <h2>How can I help you today?</h2>
           <p>I search the web, cite sources, and remember our conversation. Ask me anything!</p>
         </div>
@@ -896,7 +908,7 @@
       ids.forEach((id, index) => {
         const item = document.createElement('div');
         item.className = 'sidebar-item' + (id === currentSessionId ? ' active' : '');
-        item.innerHTML = `<span class="icon">ðŸ’¬</span><span class="label">Conversation ${ids.length - index}</span>`;
+        item.innerHTML = `<span class="icon">&#128172;</span><span class="label">Conversation ${ids.length - index}</span>`;
         item.addEventListener('click', async () => {
           saveSessionId(id);
           await loadSessionMessages();
@@ -952,8 +964,13 @@
         });
 
         if (!resp.ok) {
-          // Fallback to non-streaming
-          throw new Error('Stream not available, falling back');
+          const detail = await getResponseError(resp);
+          console.error('Chat stream request failed', {
+            status: resp.status,
+            statusText: resp.statusText,
+            detail,
+          });
+          throw new Error(`Stream request failed (${resp.status}): ${detail}`);
         }
 
         const reader = resp.body.getReader();
@@ -991,6 +1008,7 @@
 
         checkHealth();
       } catch (e) {
+        console.error('Chat stream execution failed', e);
         if (!streamUsed) {
           // Non-streaming fallback
           removeTyping();
@@ -1000,12 +1018,21 @@
               headers,
               body: JSON.stringify({ message, session_id: currentSessionId }),
             });
-            const data = await resp.json().catch(() => ({}));
-            if (!resp.ok) throw new Error(data.detail || `Request failed (${resp.status})`);
+            if (!resp.ok) {
+              const detail = await getResponseError(resp);
+              console.error('Chat fallback request failed', {
+                status: resp.status,
+                statusText: resp.statusText,
+                detail,
+              });
+              throw new Error(`Request failed (${resp.status}): ${detail}`);
+            }
+            const data = await resp.json();
 
             if (data.session_id) saveSessionId(data.session_id);
             addMessage('assistant', data.answer || '', { sources: data.sources || [] });
           } catch (err) {
+            console.error('Chat fallback execution failed', err);
             removeTyping();
             addMessage('assistant', `Sorry, ${err.message || 'something went wrong'}. Please try again.`, { isError: true });
           }
@@ -1068,6 +1095,7 @@
           }
           break;
         case 'error':
+          console.error('Chat stream returned an error event', data.detail || 'Unknown stream error');
           if (streamRenderFrame) cancelAnimationFrame(streamRenderFrame);
           flushStreamTokens();
           document.querySelector('.message.assistant[data-streaming]')?.removeAttribute('data-streaming');
@@ -1148,7 +1176,7 @@
     setInterval(checkHealth, 30000);
 
     // Show welcome message for returning session
-    console.log('ðŸ¤– Live AI Assistant loaded. Session:', currentSessionId);
+    console.log('Live AI Assistant loaded. Session:', currentSessionId);
   </script>
 </body>
 </html>
