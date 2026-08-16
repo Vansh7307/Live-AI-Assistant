@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import llm
 
 
-class FakeGeminiInteraction:
+class FakeGeminiResponse:
     def __init__(self, text):
-        self.output_text = text
+        self.text = text
 
 
 class FakeOpenAIResponse:
@@ -32,7 +32,7 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_gemini_returns_text(self):
         fake_client = MagicMock()
-        fake_client.interactions.create.return_value = FakeGeminiInteraction("ok")
+        fake_client.models.generate_content.return_value = FakeGeminiResponse("ok")
         with patch.dict(
             "os.environ",
             {"GOOGLE_API_KEY": "test-key", "LLM_PROVIDERS": "gemini"},
@@ -43,62 +43,60 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
                 result = await llm.generate_text("hi", temperature=0.2)
         self.assertEqual(result, "ok")
 
-    def test_gemini_uses_current_interactions_model_by_default(self):
+    def test_gemini_uses_compatible_model_by_default(self):
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}, clear=True), patch(
             "llm._GeminiProvider"
         ) as mock_provider:
             llm._provider_from_env()
-        mock_provider.assert_called_once_with("test-key", "gemini-3.6-flash")
+        mock_provider.assert_called_once_with("test-key", "gemini-1.5-flash")
 
-    def test_gemini_generate_uses_interactions_api(self):
+    def test_gemini_generate_uses_generate_content_api(self):
         provider = object.__new__(llm._GeminiProvider)
         provider._client = MagicMock()
-        provider._model = "gemini-3.6-flash"
-        provider._client.interactions.create.return_value = FakeGeminiInteraction("ok")
+        provider._model = "gemini-1.5-flash"
+        provider._client.models.generate_content.return_value = FakeGeminiResponse("ok")
 
         self.assertEqual(provider.generate("hi", 0.2), "ok")
-        provider._client.interactions.create.assert_called_once_with(
-            model="gemini-3.6-flash",
-            input="hi",
-            generation_config={"temperature": 0.2},
+        provider._client.models.generate_content.assert_called_once_with(
+            model="gemini-1.5-flash",
+            contents="hi",
+            config={"temperature": 0.2},
         )
 
-    def test_gemini_stream_uses_interaction_step_delta_text(self):
+    def test_gemini_stream_uses_generate_content_stream_text(self):
         provider = object.__new__(llm._GeminiProvider)
         provider._client = MagicMock()
-        provider._model = "gemini-3.6-flash"
-        text_event = MagicMock(event_type="step.delta")
-        text_event.delta.type = "text"
-        text_event.delta.text = "hello"
-        ignored_event = MagicMock(event_type="interaction.completed")
-        provider._client.interactions.create.return_value = [text_event, ignored_event]
+        provider._model = "gemini-1.5-flash"
+        provider._client.models.generate_content_stream.return_value = [
+            FakeGeminiResponse("hello"),
+            FakeGeminiResponse(""),
+        ]
 
         self.assertEqual(list(provider.stream("hi", 0.2)), ["hello"])
-        provider._client.interactions.create.assert_called_once_with(
-            model="gemini-3.6-flash",
-            input="hi",
-            generation_config={"temperature": 0.2},
-            stream=True,
+        provider._client.models.generate_content_stream.assert_called_once_with(
+            model="gemini-1.5-flash",
+            contents="hi",
+            config={"temperature": 0.2},
         )
 
-    def test_gemini_retries_model_not_found_with_interactions_fallback(self):
+    def test_gemini_retries_model_not_found_with_compatible_fallback(self):
         provider = object.__new__(llm._GeminiProvider)
         provider._client = MagicMock()
         provider._model = "invalid-model"
-        provider._client.interactions.create.side_effect = [
+        provider._client.models.generate_content.side_effect = [
             RuntimeError("404 NOT_FOUND: model does not exist"),
-            FakeGeminiInteraction("fallback response"),
+            FakeGeminiResponse("fallback response"),
         ]
 
         self.assertEqual(provider.generate("hi", 0.2), "fallback response")
         self.assertEqual(
-            provider._client.interactions.create.call_args_list,
+            provider._client.models.generate_content.call_args_list,
             [
                 call(
-                    model="invalid-model", input="hi", generation_config={"temperature": 0.2}
+                    model="invalid-model", contents="hi", config={"temperature": 0.2}
                 ),
                 call(
-                    model="gemini-3.5-flash", input="hi", generation_config={"temperature": 0.2}
+                    model="gemini-1.5-pro", contents="hi", config={"temperature": 0.2}
                 ),
             ],
         )

@@ -28,8 +28,8 @@ from google import genai
 logger = logging.getLogger(__name__)
 
 _QUOTA_MARKERS = ("429", "quota", "rate limit", "resource_exhausted", "insufficient_quota")
-_GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
-_GEMINI_FALLBACK_MODEL = "gemini-3.5-flash"
+_GEMINI_DEFAULT_MODEL = "gemini-1.5-flash"
+_GEMINI_FALLBACK_MODEL = "gemini-1.5-pro"
 _GEMINI_MODEL_ERROR_MARKERS = ("404", "not_found", "not found", "model not found", "deprecated")
 _CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "3"))
 _CIRCUIT_RESET_SECONDS = float(os.getenv("LLM_CIRCUIT_RESET_SECONDS", "30"))
@@ -56,15 +56,14 @@ class _GeminiProvider:
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
-    def _create_interaction(self, prompt: str, temperature: float, *, stream: bool = False):
+    def _generate_content(self, prompt: str, temperature: float) -> Any:
         kwargs = {
             "model": self._model,
-            "input": prompt,
-            "generation_config": {"temperature": temperature},
-            **({"stream": True} if stream else {}),
+            "contents": prompt,
+            "config": {"temperature": temperature},
         }
         try:
-            return self._client.interactions.create(**kwargs)
+            return self._client.models.generate_content(**kwargs)
         except Exception as exc:
             if (
                 self._model == _GEMINI_FALLBACK_MODEL
@@ -78,24 +77,42 @@ class _GeminiProvider:
                 exc,
             )
             kwargs["model"] = _GEMINI_FALLBACK_MODEL
-            return self._client.interactions.create(**kwargs)
+            return self._client.models.generate_content(**kwargs)
+
+    def _generate_content_stream(self, prompt: str, temperature: float) -> Any:
+        kwargs = {
+            "model": self._model,
+            "contents": prompt,
+            "config": {"temperature": temperature},
+        }
+        try:
+            return self._client.models.generate_content_stream(**kwargs)
+        except Exception as exc:
+            if (
+                self._model == _GEMINI_FALLBACK_MODEL
+                or not any(marker in str(exc).lower() for marker in _GEMINI_MODEL_ERROR_MARKERS)
+            ):
+                raise
+            logger.warning(
+                "Gemini model %s is unavailable; retrying with fallback model %s: %s",
+                self._model,
+                _GEMINI_FALLBACK_MODEL,
+                exc,
+            )
+            kwargs["model"] = _GEMINI_FALLBACK_MODEL
+            return self._client.models.generate_content_stream(**kwargs)
 
     def generate(self, prompt: str, temperature: float) -> str:
-        interaction = self._create_interaction(prompt, temperature)
-        if not interaction.output_text:
+        response = self._generate_content(prompt, temperature)
+        if not response.text:
             raise RuntimeError("Gemini returned an empty response")
-        return interaction.output_text
+        return response.text
 
     def stream(self, prompt: str, temperature: float):
-        stream = self._create_interaction(prompt, temperature, stream=True)
-        for event in stream:
-            if (
-                getattr(event, "event_type", None) == "step.delta"
-                and getattr(event, "delta", None)
-                and getattr(event.delta, "type", None) == "text"
-                and getattr(event.delta, "text", None)
-            ):
-                yield event.delta.text
+        stream = self._generate_content_stream(prompt, temperature)
+        for chunk in stream:
+            if chunk.text:
+                yield chunk.text
 
 
 class _OpenAIProvider:
