@@ -17,7 +17,7 @@ A production-grade, **live** streaming AI assistant.
 - **Multi-provider LLM** with automatic failover (Gemini → OpenAI → Anthropic)
 - **Long-term memory** per session with automatic summarization
   (SQLite for single-instance, PostgreSQL for multi-instance production)
-- **Observable**: Prometheus `/metrics`, `/health/live`, `/health/ready`, request tracing
+- **Observable**: Prometheus `/metrics`, detailed `/health`, `/health/live`, `/health/ready`, request tracing
 - **Safety layer**: configurable prompt-injection + output-content guardrails
 - **Degrades gracefully**: a flaky search or verification call never fails the whole request
 
@@ -55,8 +55,11 @@ This repo's `.gitignore` already excludes `.env`, `*.log`, and `memory.sqlite3`.
 Keep it that way, and double check `git status` before every commit.
 
 Before deploying publicly:
-- Set `APP_API_KEY` so `/chat` requires an `X-API-Key` header. Without it,
-  anyone with your URL can spend your Gemini/Tavily quota.
+- Do **not** put `APP_API_KEY` in `frontend/config.js`, a URL query string, or
+  Vercel's public environment variables. A static frontend cannot keep a
+  shared secret. For public access, add real user authentication or place a
+  trusted server-side proxy in front of the API; use `APP_API_KEY` only for
+  trusted machine-to-machine callers.
 - Set `CHAT_RATE_LIMIT` (default `20/minute` per IP) to a value that fits
   your budget.
 - Set `CORS_ORIGINS` to your real frontend origin(s) only.
@@ -86,8 +89,8 @@ cd backend
 uvicorn main:app --reload --port 8000
 ```
 Open `frontend/index.html` in a browser (or serve it with any static file
-server). If your backend requires `APP_API_KEY`, open the page as
-`frontend/index.html?apiKey=YOUR_KEY`.
+server). Browser deployments must leave `APP_API_KEY` unset unless a trusted
+server-side authentication layer injects credentials.
 
 For a streaming/localhost demo simply open the page; it auto-detects
 `http://localhost:8000` and uses the SSE `/chat/stream` endpoint by default,
@@ -154,12 +157,14 @@ Same request body. Returns a `text/event-stream` with named events:
 | `done` | `{}` — stream complete |
 | `error` | `{ "detail": "..." }` — a recoverable error |
 
-### `GET /sessions`
-Returns `{ "sessions": [...] }` — recent sessions + summaries for the
-frontend history sidebar.
+### `GET /sessions/{session_id}`
+Returns persisted messages for one opaque session ID. The API deliberately
+does not expose a global session index, which would leak other visitors'
+conversation metadata. The frontend keeps its own session index in browser
+storage and restores only those conversations.
 
 ### Health & operations
-- `GET /health` → `{ "status": "ok" }`
+- `GET /health` → operational status, process uptime, in-process latency, and version
 - `GET /health/live` → `{ "status": "alive" }` (liveness probe)
 - `GET /health/ready` → `{ "status": "ready" }` or HTTP 503 if no LLM provider
   is configured (readiness probe)

@@ -195,14 +195,14 @@ async def stream_answer(message: str, session_id: str) -> AsyncGenerator[dict[st
     except Exception as exc:  # noqa: BLE001
         CHAT_LLM_FAILURES.labels("stream").inc()
         logger.exception("Streaming failed")
-        yield {"type": "token", "token": f"\n\n[Error: {exc}]"}
-    finally:
-        state["answer"] = full_answer
-        # Verify and persist (best-effort, non-blocking for the stream).
-        try:
-            await node_verify(state)
-            await node_compact_memory(state)
-            await node_store_memory(state)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Post-stream persistence failed: %s", exc)
-        yield {"type": "done"}
+        raise
+
+    state["answer"] = full_answer
+    # Verify and persist after delivery; neither operation delays first token.
+    try:
+        await node_verify(state)
+        await node_compact_memory(state)
+        await node_store_memory(state)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Post-stream persistence failed: %s", exc)
+    yield {"type": "done"}

@@ -1,0 +1,8 @@
+{
+  "name": "live-ai-assistant-frontend",
+  "private": true,
+  "version": "2.0.0",
+  "scripts": {
+    "build": "node scripts/validate-static.mjs"
+  }
+}

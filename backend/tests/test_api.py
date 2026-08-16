@@ -45,7 +45,16 @@ class ApiTests(unittest.TestCase):
     def test_health_check(self):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("uptime_seconds", data)
+        self.assertIn("latency_ms", data)
+
+    def test_session_history_is_scoped_to_requested_session(self):
+        with patch("memory.sqlite_memory.Memory.get_recent_messages", return_value=[]):
+            response = self.client.get("/sessions/session-123")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"session_id": "session-123", "messages": []})
 
     def test_health_ready_without_provider_returns_503(self):
         # Force all LLM provider keys to be absent.

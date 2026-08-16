@@ -533,14 +533,15 @@
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
   <script src="config.js"></script>
   <script>
     // â”€â”€ Configuration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const API_BASE = new URLSearchParams(window.location.search).get('api') ||
       window.__API_BASE_URL__ ||
       (['localhost', '127.0.0.1'].includes(window.location.hostname) ? 'http://localhost:8000' : window.location.origin);
-    const API_KEY = new URLSearchParams(window.location.search).get('apiKey') || window.__API_KEY__ || '';
     const SESSION_KEY = 'live-ai-assistant-session-id';
+    const SESSION_INDEX_KEY = 'live-ai-assistant-session-index';
 
     // â”€â”€ DOM refs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const chatArea = document.getElementById('chatArea');
@@ -600,9 +601,13 @@
     function renderMarkdown(text) {
       if (!text) return '';
       try {
-        return marked.parse(text, { breaks: true, gfm: true });
+        // Model and search output are untrusted. Sanitize after Markdown
+        // conversion to prevent a response from injecting executable HTML.
+        return DOMPurify.sanitize(marked.parse(text, { breaks: true, gfm: true }));
       } catch (e) {
-        return text.replace(/\n/g, '<br>');
+        const escaped = document.createElement('div');
+        escaped.textContent = text;
+        return escaped.innerHTML.replace(/\n/g, '<br>');
       }
     }
 
@@ -734,6 +739,18 @@
     function saveSessionId(id) {
       currentSessionId = id;
       localStorage.setItem(SESSION_KEY, id);
+      const ids = getSavedSessionIds().filter(savedId => savedId !== id);
+      ids.unshift(id);
+      localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(ids.slice(0, 50)));
+    }
+
+    function getSavedSessionIds() {
+      try {
+        const ids = JSON.parse(localStorage.getItem(SESSION_INDEX_KEY) || '[]');
+        return Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [];
+      } catch (_) {
+        return [];
+      }
     }
 
     function newSession() {
@@ -749,40 +766,39 @@
     newChatBtn.addEventListener('click', newSession);
 
     function loadSessions() {
-      const headers = { 'Content-Type': 'application/json' };
-      if (API_KEY) headers['X-API-Key'] = API_KEY;
-
-      fetch(`${API_BASE.replace(/\/$/, '')}/sessions`, { headers })
-        .then(r => r.json())
-        .then(data => {
-          const list = data.sessions || [];
-          sessionList.innerHTML = '';
-          if (list.length === 0) {
-            sessionList.innerHTML = '<div class="sidebar-item" style="color:var(--text-muted);font-size:13px;text-align:center;padding:20px;cursor:default;">No saved conversations yet</div>';
-            return;
-          }
-          list.forEach(s => {
-            const item = document.createElement('div');
-            item.className = 'sidebar-item' + (s.session_id === currentSessionId ? ' active' : '');
-            item.innerHTML = `
-              <span class="icon">ðŸ’¬</span>
-              <span class="label">${s.summary ? s.summary.slice(0, 50) + (s.summary.length > 50 ? 'â€¦' : '') : 'New conversation'}</span>
-              <span style="font-size:11px;color:var(--text-muted);flex-shrink:0;">${s.message_count}</span>
-            `;
-            item.addEventListener('click', () => {
-              saveSessionId(s.session_id);
-              clearChat();
-              addMessage('system', 'Switched to previous conversation. Messages will appear as you continue chatting.');
-              sidebar.classList.remove('open');
-              overlay.classList.remove('show');
-              loadSessions();
-            });
-            sessionList.appendChild(item);
-          });
-        })
-        .catch(() => {
-          // Silently fail â€” sessions are a nice-to-have.
+      const ids = getSavedSessionIds();
+      sessionList.innerHTML = '';
+      if (ids.length === 0) {
+        sessionList.innerHTML = '<div class="sidebar-item" style="color:var(--text-muted);font-size:13px;text-align:center;padding:20px;cursor:default;">No saved conversations yet</div>';
+        return;
+      }
+      ids.forEach((id, index) => {
+        const item = document.createElement('div');
+        item.className = 'sidebar-item' + (id === currentSessionId ? ' active' : '');
+        item.innerHTML = `<span class="icon">ðŸ’¬</span><span class="label">Conversation ${ids.length - index}</span>`;
+        item.addEventListener('click', async () => {
+          saveSessionId(id);
+          await loadSessionMessages();
+          sidebar.classList.remove('open');
+          overlay.classList.remove('show');
+          loadSessions();
         });
+        sessionList.appendChild(item);
+      });
+    }
+
+    async function loadSessionMessages() {
+      clearChat();
+      try {
+        const resp = await fetch(`${API_BASE.replace(/\/$/, '')}/sessions/${encodeURIComponent(currentSessionId)}`);
+        if (!resp.ok) throw new Error(`History request failed (${resp.status})`);
+        const data = await resp.json();
+        (data.messages || []).forEach(message => {
+          if (message.role === 'user' || message.role === 'assistant') addMessage(message.role, message.content);
+        });
+      } catch (_) {
+        showToast('Could not restore this conversation.', 'error');
+      }
     }
 
     // â”€â”€ Send message â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -801,7 +817,6 @@
       setStatus('thinking', 'Thinkingâ€¦');
 
       const headers = { 'Content-Type': 'application/json' };
-      if (API_KEY) headers['X-API-Key'] = API_KEY;
 
       // Try streaming first, fall back to non-streaming.
       let streamUsed = false;
@@ -966,11 +981,12 @@
     if (!localStorage.getItem(SESSION_KEY)) {
       localStorage.setItem(SESSION_KEY, currentSessionId);
     }
+    saveSessionId(currentSessionId);
     loadSessions();
+    loadSessionMessages();
 
     // Show welcome message for returning session
     console.log('ðŸ¤– Live AI Assistant loaded. Session:', currentSessionId);
   </script>
 </body>
 </html>
-

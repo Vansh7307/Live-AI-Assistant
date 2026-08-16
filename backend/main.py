@@ -56,6 +56,7 @@ RATE_LIMIT = os.getenv("CHAT_RATE_LIMIT", "20/minute")
 APP_API_KEY = os.getenv("APP_API_KEY")  # optional: set to require an API key on /chat
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_STARTED_AT = time.monotonic()
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -172,6 +173,11 @@ class SessionListResponse(BaseModel):
     sessions: list[dict]
 
 
+class SessionHistoryResponse(BaseModel):
+    session_id: str
+    messages: list[dict]
+
+
 def _require_api_key(x_api_key: str | None) -> None:
     if APP_API_KEY and x_api_key != APP_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
@@ -272,19 +278,39 @@ async def chat_stream(
     )
 
 
-@app.get("/sessions")
-async def list_sessions():
-    """For the frontend history sidebar. Requires API key if configured."""
+@app.get("/sessions/{session_id}", response_model=SessionHistoryResponse)
+async def session_history(
+    session_id: str,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+):
+    """Return one opaque session's history.
+
+    Session IDs are generated with UUID4 by the browser and act as an opaque
+    capability.  Deliberately do not expose a global session index: doing so
+    would disclose other visitors' conversation metadata on a public site.
+    Add application-level user authentication before replacing this with a
+    cross-user history view.
+    """
+    _require_api_key(x_api_key)
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=422, detail="Invalid session_id")
     from memory.sqlite_memory import Memory
 
     mem = Memory()
-    sessions = await asyncio.to_thread(mem.list_sessions)
-    return SessionListResponse(sessions=sessions)
+    messages = await asyncio.to_thread(mem.get_recent_messages, session_id, 100)
+    return SessionHistoryResponse(session_id=session_id, messages=messages)
 
 
 @app.get("/health", include_in_schema=False)
 async def health():
-    return {"status": "ok"}
+    # Keep this dependency-free so orchestrators can use it during startup.
+    started = time.monotonic()
+    return {
+        "status": "ok",
+        "uptime_seconds": round(started - _STARTED_AT, 3),
+        "latency_ms": round((time.monotonic() - started) * 1000, 3),
+        "version": app.version,
+    }
 
 
 @app.get("/health/live", include_in_schema=False)

@@ -3,8 +3,6 @@
 // This intentionally stays a plain JS file (no build step) so Vercel can
 // serve this folder as-is with zero configuration.
 window.__API_BASE_URL__ = "https://YOUR-BACKEND-NAME.onrender.com";
-
-// Only needed if you set APP_API_KEY on the Render backend. Leave blank to
-// run without auth (fine for a personal demo, not for a public link you'll
-// share widely - see SECURITY.md).
-window.__API_KEY__ = "";
+// Do not put API keys, provider credentials, or database URLs in this file:
+// it is downloaded by every visitor. Public deployments should use proper
+// user authentication / a trusted server-side proxy for privileged APIs.
