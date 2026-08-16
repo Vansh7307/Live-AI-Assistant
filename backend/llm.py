@@ -28,9 +28,22 @@ from google import genai
 logger = logging.getLogger(__name__)
 
 _QUOTA_MARKERS = ("429", "quota", "rate limit", "resource_exhausted", "insufficient_quota")
-_GEMINI_DEFAULT_MODEL = "gemini-1.5-flash"
-_GEMINI_FALLBACK_MODEL = "gemini-1.5-pro"
-_GEMINI_MODEL_ERROR_MARKERS = ("404", "not_found", "not found", "model not found", "deprecated")
+GEMINI_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-pro",
+)
+_GEMINI_DEFAULT_MODEL = GEMINI_MODELS[0]
+_GEMINI_MODEL_ERROR_MARKERS = (
+    "404",
+    "not_found",
+    "not found",
+    "model not found",
+    "invalid model",
+    "deprecated",
+)
 _CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "3"))
 _CIRCUIT_RESET_SECONDS = float(os.getenv("LLM_CIRCUIT_RESET_SECONDS", "30"))
 _CIRCUITS: dict[str, dict[str, float]] = {}
@@ -56,63 +69,65 @@ class _GeminiProvider:
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
-    def _generate_content(self, prompt: str, temperature: float) -> Any:
-        kwargs = {
-            "model": self._model,
-            "contents": prompt,
-            "config": {"temperature": temperature},
-        }
-        try:
-            return self._client.models.generate_content(**kwargs)
-        except Exception as exc:
-            if (
-                self._model == _GEMINI_FALLBACK_MODEL
-                or not any(marker in str(exc).lower() for marker in _GEMINI_MODEL_ERROR_MARKERS)
-            ):
-                raise
-            logger.warning(
-                "Gemini model %s is unavailable; retrying with fallback model %s: %s",
-                self._model,
-                _GEMINI_FALLBACK_MODEL,
-                exc,
-            )
-            kwargs["model"] = _GEMINI_FALLBACK_MODEL
-            return self._client.models.generate_content(**kwargs)
+    def _candidate_models(self) -> tuple[str, ...]:
+        """Try an explicitly configured model first, then known production aliases."""
+        return tuple(dict.fromkeys((self._model, *GEMINI_MODELS)))
 
-    def _generate_content_stream(self, prompt: str, temperature: float) -> Any:
-        kwargs = {
-            "model": self._model,
-            "contents": prompt,
-            "config": {"temperature": temperature},
-        }
-        try:
-            return self._client.models.generate_content_stream(**kwargs)
-        except Exception as exc:
-            if (
-                self._model == _GEMINI_FALLBACK_MODEL
-                or not any(marker in str(exc).lower() for marker in _GEMINI_MODEL_ERROR_MARKERS)
-            ):
-                raise
-            logger.warning(
-                "Gemini model %s is unavailable; retrying with fallback model %s: %s",
-                self._model,
-                _GEMINI_FALLBACK_MODEL,
-                exc,
-            )
-            kwargs["model"] = _GEMINI_FALLBACK_MODEL
-            return self._client.models.generate_content_stream(**kwargs)
+    @staticmethod
+    def _is_model_error(exc: Exception) -> bool:
+        return any(marker in str(exc).lower() for marker in _GEMINI_MODEL_ERROR_MARKERS)
+
+    @staticmethod
+    def _log_model_failure(model: str, exc: Exception) -> None:
+        logger.warning("[Gemini] Model '%s' failed: %s. Trying next fallback...", model, exc)
 
     def generate(self, prompt: str, temperature: float) -> str:
-        response = self._generate_content(prompt, temperature)
-        if not response.text:
-            raise RuntimeError("Gemini returned an empty response")
-        return response.text
+        last_error: Exception | None = None
+        for model in self._candidate_models():
+            try:
+                response = self._client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config={"temperature": temperature},
+                )
+                if response and response.text:
+                    return response.text
+                raise RuntimeError("Gemini returned an empty response")
+            except Exception as exc:
+                if not self._is_model_error(exc):
+                    raise
+                last_error = exc
+                self._log_model_failure(model, exc)
+
+        raise last_error or RuntimeError("All Gemini fallback models failed.")
 
     def stream(self, prompt: str, temperature: float):
-        stream = self._generate_content_stream(prompt, temperature)
-        for chunk in stream:
-            if chunk.text:
-                yield chunk.text
+        last_error: Exception | None = None
+        for model in self._candidate_models():
+            emitted_text = False
+            try:
+                response_stream = self._client.models.generate_content_stream(
+                    model=model,
+                    contents=prompt,
+                    config={"temperature": temperature},
+                )
+                for chunk in response_stream:
+                    text = getattr(chunk, "text", None)
+                    if text:
+                        emitted_text = True
+                        yield text
+                if emitted_text:
+                    return
+                last_error = RuntimeError("Gemini stream returned no text")
+                logger.warning("[Gemini] Model '%s' returned an empty stream. Trying next fallback...", model)
+            except Exception as exc:
+                # Once text has been sent, a fallback would duplicate the answer.
+                if emitted_text or not self._is_model_error(exc):
+                    raise
+                last_error = exc
+                self._log_model_failure(model, exc)
+
+        raise last_error or RuntimeError("All Gemini fallback models failed.")
 
 
 class _OpenAIProvider:

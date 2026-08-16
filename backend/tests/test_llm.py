@@ -43,22 +43,22 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
                 result = await llm.generate_text("hi", temperature=0.2)
         self.assertEqual(result, "ok")
 
-    def test_gemini_uses_compatible_model_by_default(self):
+    def test_gemini_uses_first_priority_model_by_default(self):
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}, clear=True), patch(
             "llm._GeminiProvider"
         ) as mock_provider:
             llm._provider_from_env()
-        mock_provider.assert_called_once_with("test-key", "gemini-1.5-flash")
+        mock_provider.assert_called_once_with("test-key", "gemini-2.5-flash")
 
     def test_gemini_generate_uses_generate_content_api(self):
         provider = object.__new__(llm._GeminiProvider)
         provider._client = MagicMock()
-        provider._model = "gemini-1.5-flash"
+        provider._model = "gemini-2.5-flash"
         provider._client.models.generate_content.return_value = FakeGeminiResponse("ok")
 
         self.assertEqual(provider.generate("hi", 0.2), "ok")
         provider._client.models.generate_content.assert_called_once_with(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents="hi",
             config={"temperature": 0.2},
         )
@@ -66,7 +66,7 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
     def test_gemini_stream_uses_generate_content_stream_text(self):
         provider = object.__new__(llm._GeminiProvider)
         provider._client = MagicMock()
-        provider._model = "gemini-1.5-flash"
+        provider._model = "gemini-2.5-flash"
         provider._client.models.generate_content_stream.return_value = [
             FakeGeminiResponse("hello"),
             FakeGeminiResponse(""),
@@ -74,7 +74,7 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(list(provider.stream("hi", 0.2)), ["hello"])
         provider._client.models.generate_content_stream.assert_called_once_with(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents="hi",
             config={"temperature": 0.2},
         )
@@ -96,7 +96,29 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
                     model="invalid-model", contents="hi", config={"temperature": 0.2}
                 ),
                 call(
-                    model="gemini-1.5-pro", contents="hi", config={"temperature": 0.2}
+                    model="gemini-2.5-flash", contents="hi", config={"temperature": 0.2}
+                ),
+            ],
+        )
+
+    def test_gemini_stream_retries_model_not_found_with_next_fallback(self):
+        provider = object.__new__(llm._GeminiProvider)
+        provider._client = MagicMock()
+        provider._model = "invalid-model"
+        provider._client.models.generate_content_stream.side_effect = [
+            RuntimeError("404 NOT_FOUND: model does not exist"),
+            [FakeGeminiResponse("fallback stream")],
+        ]
+
+        self.assertEqual(list(provider.stream("hi", 0.2)), ["fallback stream"])
+        self.assertEqual(
+            provider._client.models.generate_content_stream.call_args_list,
+            [
+                call(
+                    model="invalid-model", contents="hi", config={"temperature": 0.2}
+                ),
+                call(
+                    model="gemini-2.5-flash", contents="hi", config={"temperature": 0.2}
                 ),
             ],
         )
