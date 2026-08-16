@@ -28,15 +28,16 @@ from google import genai
 logger = logging.getLogger(__name__)
 
 _QUOTA_MARKERS = ("429", "quota", "rate limit", "resource_exhausted", "insufficient_quota")
-# Keep only documented current production aliases here. The API discovery below
-# appends models actually enabled for the deployed API key and region.
-PRIMARY_MODELS = (
+# Direct fallback sequence: no models.list() request is made. These are
+# current production aliases, so older deprecated 1.x/2.0 names cannot cause
+# a discovery-time or generation-time model-resolution failure.
+FALLBACK_MODELS = (
     "gemini-2.5-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-2.5-pro",
 )
-_GEMINI_DEFAULT_MODEL = PRIMARY_MODELS[0]
+_GEMINI_DEFAULT_MODEL = FALLBACK_MODELS[0]
 _CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "3"))
 _CIRCUIT_RESET_SECONDS = float(os.getenv("LLM_CIRCUIT_RESET_SECONDS", "30"))
 _CIRCUITS: dict[str, dict[str, float]] = {}
@@ -57,47 +58,14 @@ class LLMProviderError(LLMError):
     DNS failure, network error)."""
 
 
-def get_working_models(client: Any | None) -> tuple[str, ...]:
-    """Return primary models followed by generateContent-capable API models.
-
-    Discovery is deliberately best-effort: listing failures never prevent the
-    known production models from being used. The Gemini SDK and older API
-    representations use different capability field names, so both are
-    accepted while retaining the same generateContent filter.
-    """
-    models_to_try = list(PRIMARY_MODELS)
-    if client is None:
-        return tuple(models_to_try)
-
-    try:
-        for available_model in client.models.list():
-            methods = (
-                getattr(available_model, "supported_generation_methods", None)
-                or getattr(available_model, "supported_actions", None)
-                or ()
-            )
-            normalized_methods = {str(method).replace("_", "").lower() for method in methods}
-            if "generatecontent" not in normalized_methods:
-                continue
-
-            name = getattr(available_model, "name", "")
-            model_name = name.removeprefix("models/") if name else ""
-            if model_name and model_name not in models_to_try:
-                models_to_try.append(model_name)
-    except Exception as exc:  # noqa: BLE001 - discovery is an optional enhancement
-        logger.warning("[Gemini] Dynamic model listing skipped: %s", exc)
-
-    return tuple(models_to_try)
-
-
 class _GeminiProvider:
     def __init__(self, api_key: str, model: str):
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
     def _candidate_models(self) -> tuple[str, ...]:
-        """Try an explicit deployment override, then API-resolved candidates."""
-        return tuple(dict.fromkeys((self._model, *get_working_models(self._client))))
+        """Try an explicit deployment override, then direct production fallbacks."""
+        return tuple(dict.fromkeys((self._model, *FALLBACK_MODELS)))
 
     @staticmethod
     def _log_model_failure(model: str, exc: Exception) -> None:
