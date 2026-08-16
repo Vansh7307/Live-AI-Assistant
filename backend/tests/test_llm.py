@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import llm
 
@@ -79,6 +79,28 @@ class GenerateTextTests(unittest.IsolatedAsyncioTestCase):
             input="hi",
             generation_config={"temperature": 0.2},
             stream=True,
+        )
+
+    def test_gemini_retries_model_not_found_with_interactions_fallback(self):
+        provider = object.__new__(llm._GeminiProvider)
+        provider._client = MagicMock()
+        provider._model = "invalid-model"
+        provider._client.interactions.create.side_effect = [
+            RuntimeError("404 NOT_FOUND: model does not exist"),
+            FakeGeminiInteraction("fallback response"),
+        ]
+
+        self.assertEqual(provider.generate("hi", 0.2), "fallback response")
+        self.assertEqual(
+            provider._client.interactions.create.call_args_list,
+            [
+                call(
+                    model="invalid-model", input="hi", generation_config={"temperature": 0.2}
+                ),
+                call(
+                    model="gemini-3.5-flash", input="hi", generation_config={"temperature": 0.2}
+                ),
+            ],
         )
 
     async def test_transient_failure_then_success_recovers(self):

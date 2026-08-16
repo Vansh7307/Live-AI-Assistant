@@ -23,9 +23,14 @@ import os
 import time
 from typing import Any, Callable, Awaitable
 
+from google import genai
+
 logger = logging.getLogger(__name__)
 
 _QUOTA_MARKERS = ("429", "quota", "rate limit", "resource_exhausted", "insufficient_quota")
+_GEMINI_DEFAULT_MODEL = "gemini-3.6-flash"
+_GEMINI_FALLBACK_MODEL = "gemini-3.5-flash"
+_GEMINI_MODEL_ERROR_MARKERS = ("404", "not_found", "not found", "model not found", "deprecated")
 _CIRCUIT_FAILURE_THRESHOLD = int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "3"))
 _CIRCUIT_RESET_SECONDS = float(os.getenv("LLM_CIRCUIT_RESET_SECONDS", "30"))
 _CIRCUITS: dict[str, dict[str, float]] = {}
@@ -48,28 +53,41 @@ class LLMProviderError(LLMError):
 
 class _GeminiProvider:
     def __init__(self, api_key: str, model: str):
-        from google import genai
-
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
+    def _create_interaction(self, prompt: str, temperature: float, *, stream: bool = False):
+        kwargs = {
+            "model": self._model,
+            "input": prompt,
+            "generation_config": {"temperature": temperature},
+            **({"stream": True} if stream else {}),
+        }
+        try:
+            return self._client.interactions.create(**kwargs)
+        except Exception as exc:
+            if (
+                self._model == _GEMINI_FALLBACK_MODEL
+                or not any(marker in str(exc).lower() for marker in _GEMINI_MODEL_ERROR_MARKERS)
+            ):
+                raise
+            logger.warning(
+                "Gemini model %s is unavailable; retrying with fallback model %s: %s",
+                self._model,
+                _GEMINI_FALLBACK_MODEL,
+                exc,
+            )
+            kwargs["model"] = _GEMINI_FALLBACK_MODEL
+            return self._client.interactions.create(**kwargs)
+
     def generate(self, prompt: str, temperature: float) -> str:
-        interaction = self._client.interactions.create(
-            model=self._model,
-            input=prompt,
-            generation_config={"temperature": temperature},
-        )
+        interaction = self._create_interaction(prompt, temperature)
         if not interaction.output_text:
             raise RuntimeError("Gemini returned an empty response")
         return interaction.output_text
 
     def stream(self, prompt: str, temperature: float):
-        stream = self._client.interactions.create(
-            model=self._model,
-            input=prompt,
-            generation_config={"temperature": temperature},
-            stream=True,
-        )
+        stream = self._create_interaction(prompt, temperature, stream=True)
         for event in stream:
             if (
                 getattr(event, "event_type", None) == "step.delta"
@@ -156,7 +174,7 @@ def _provider_from_env() -> list[Any]:
         if name == "gemini":
             key = os.getenv("GOOGLE_API_KEY")
             if key:
-                providers.append(_GeminiProvider(key, os.getenv("GEMINI_MODEL", "gemini-3.6-flash")))
+                providers.append(_GeminiProvider(key, os.getenv("GEMINI_MODEL", _GEMINI_DEFAULT_MODEL)))
         elif name == "openai":
             key = os.getenv("OPENAI_API_KEY")
             if key:
